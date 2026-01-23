@@ -38,7 +38,7 @@ RUN pip install --no-cache-dir -r requirements-api.txt
 FROM dependencies AS final
 
 # Copy application code
-COPY api.py .
+COPY tts_api.py .
 
 # Copy model files (these should be mounted or baked in)
 # For production, mount these as volumes instead
@@ -57,4 +57,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run the API
-CMD ["python", "api.py", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "tts_api.py", "--host", "0.0.0.0", "--port", "8000"]

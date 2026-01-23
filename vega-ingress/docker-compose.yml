@@ -14,13 +14,13 @@ services:
     environment:
       # Point to host services (use host.docker.internal on Docker Desktop,
       # or actual host IP on Linux)
-      - VEGA_TTS_BACKEND=http://172.17.0.1:8000
+      - VEGA_TTS_BACKEND=http://172.17.0.1:8010
       - VEGA_LLM_BACKEND=http://172.17.0.1:8001
       - VEGA_BACKEND_TIMEOUT=120
     
-    # Expose on port 8888 - this is the only port you need to forward
+    # Expose on port 8080 (port 8000 may be used by Portainer)
     ports:
-      - "8888:8080"
+      - "8080:8080"
     
     # Health check
     healthcheck:

@@ -325,7 +325,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     uvicorn.run(
-        "api:app",
+        "tts_api:app",
         host=args.host,
         port=args.port,
         reload=args.reload,

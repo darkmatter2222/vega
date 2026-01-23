@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 
 # Backend service URLs (internal Docker network or localhost)
-TTS_BACKEND = os.getenv("VEGA_TTS_BACKEND", "http://host.docker.internal:8000")
+TTS_BACKEND = os.getenv("VEGA_TTS_BACKEND", "http://host.docker.internal:8010")
 LLM_BACKEND = os.getenv("VEGA_LLM_BACKEND", "http://host.docker.internal:8001")
 
 # Timeout for backend requests (seconds)

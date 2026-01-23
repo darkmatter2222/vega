@@ -32,7 +32,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # ==============================================================================
 FROM dependencies AS final
 
-COPY api.py .
+COPY llm_api.py .
 
 # Environment
 ENV VEGA_MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
@@ -47,4 +47,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:8001/health || exit 1
 
 # Run
-CMD ["python", "api.py", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["python", "llm_api.py", "--host", "0.0.0.0", "--port", "8001"]

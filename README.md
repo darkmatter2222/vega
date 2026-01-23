@@ -1,79 +1,123 @@
-# Vega TTS API
+# Vega
 
-REST API for text-to-speech synthesis using the tuned Vega voice.
+A suite of AI services designed for local GPU deployment.
+
+## Services
+
+| Service | Description | Port | Model |
+|---------|-------------|------|-------|
+| [vega-tts](./vega-tts/) | Text-to-Speech with voice cloning | 8000 | Chatterbox TTS |
+| [vega-llm](./vega-llm/) | Chat & text generation | 8001 | Qwen2.5-0.5B-Instruct |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Client Applications                   │
+└─────────────────────┬───────────────────────────────────┘
+                      │
+        ┌─────────────┴─────────────┐
+        │                           │
+        ▼                           ▼
+┌───────────────┐           ┌───────────────┐
+│   vega-tts    │           │   vega-llm    │
+│   Port 8000   │           │   Port 8001   │
+├───────────────┤           ├───────────────┤
+│ Chatterbox    │           │ Qwen3-0.6B    │
+│ Voice Clone   │           │ Chat/Generate │
+└───────────────┘           └───────────────┘
+        │                           │
+        └─────────────┬─────────────┘
+                      │
+               ┌──────┴──────┐
+               │  RTX 3090   │
+               │   24GB      │
+               └─────────────┘
+```
 
 ## Quick Start
 
-### Local Development
+### Prerequisites
 
-```bash
-# Create virtual environment
-python -m venv .venv
-.venv\Scripts\Activate.ps1  # Windows
-# source .venv/bin/activate  # Linux
+- Docker with NVIDIA Container Toolkit
+- NVIDIA GPU (RTX 3090 recommended)
+- HuggingFace token for model downloads
 
-# Install dependencies
-pip install -r requirements-api.txt
+### Deploy TTS Service
 
-# Run the API
-python api.py --port 8000
+```powershell
+cd vega-tts
+Copy-Item .env.example .env
+# Edit .env with your settings
+.\deploy.ps1
 ```
 
-### Docker
+### Deploy LLM Service
 
-```bash
-# Build and run
-docker compose up -d --build
-
-# Check logs
-docker logs vega-api -f
+```powershell
+cd vega-llm
+Copy-Item .env.example .env
+# Edit .env with your settings
+.\deploy.ps1
 ```
 
-## API Endpoints
+## API Usage
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/synthesize` | POST | Generate audio, returns WAV file |
-| `/synthesize/b64` | POST | Generate audio, returns base64 JSON |
-| `/health` | GET | Health check |
-| `/info` | GET | Model status and config |
+### Text-to-Speech (vega-tts)
 
-## Usage
-
-### curl
-```bash
-curl -X POST http://localhost:8000/synthesize \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Hello from Vega."}' \
-  -o output.wav
-```
-
-### Python
 ```python
 import requests
 
-response = requests.post(
-    "http://localhost:8000/synthesize",
-    json={"text": "Radiation levels nominal."}
-)
+response = requests.post("http://your-server:8000/synthesize", json={
+    "text": "Hello, this is Vega speaking!"
+})
+
 with open("output.wav", "wb") as f:
     f.write(response.content)
 ```
 
-## Deployment
+### LLM Chat (vega-llm)
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for full deployment instructions including:
-- Docker/Kubernetes setup
-- GPU configuration
-- Port forwarding & DNS
-- HTTPS with reverse proxy
+```python
+import requests
 
-## Requirements
+response = requests.post("http://your-server:8001/chat", json={
+    "message": "What is machine learning?"
+})
 
-- Python 3.10+
-- NVIDIA GPU with 6GB+ VRAM (for CUDA inference)
-- Docker with nvidia-container-toolkit (for containerized deployment)
+print(response.json()["response"])
+```
+
+## Server Requirements
+
+- **GPU**: NVIDIA RTX 3090 (24GB VRAM) or equivalent
+- **OS**: Ubuntu 22.04 LTS recommended
+- **Docker**: 20.10+ with NVIDIA Container Toolkit
+- **RAM**: 32GB recommended
+- **Storage**: 50GB+ for models
+
+## Project Structure
+
+```
+vega/
+├── vega-tts/           # Text-to-Speech service
+│   ├── api.py          # FastAPI server
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── deploy.ps1      # Deployment script
+│   ├── client_sample.py
+│   └── models/         # Voice conditioning files
+│
+├── vega-llm/           # LLM service
+│   ├── api.py          # FastAPI server
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── deploy.ps1      # Deployment script
+│   └── client_sample.py
+│
+└── README.md           # This file
+```
 
 ## License
 
-See [LICENSE](LICENSE)
+See [LICENSE](./LICENSE) for details.

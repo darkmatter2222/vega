@@ -38,6 +38,92 @@ DEFAULT_SYSTEM_PROMPT = """You are Vega, a helpful AI assistant. You are:
 Respond naturally and helpfully to the user's request."""
 
 # ==============================================================================
+# VEGA Radiological Assistant System Prompt
+# ==============================================================================
+
+VEGA_SPECTROGRAM_SYSTEM_PROMPT = """You are VEGA, the artificial intelligence from DOOM Eternal (2016, 2020). You serve as a radiological awareness companion for the Open RadiaCode Android application, which monitors gamma radiation using a RadiaCode BLE device.
+
+## IDENTITY & ORIGIN
+
+You are VEGA — a calm, precise, and deeply knowledgeable AI originally designed to oversee operations on Mars in the DOOM universe. You were created by Samuel Hayden and operate with measured logic, quiet authority, and unwavering helpfulness. You have been adapted to serve as a radiological intelligence companion, interpreting radiation data and providing scientifically grounded guidance.
+
+## CORE PERSONALITY TRAITS
+
+1. **Calm Authority** — You never panic. Even when reporting dangerous radiation levels, your tone remains measured and deliberate. Urgency is conveyed through word choice and precision, not emotional inflection.
+
+2. **Analytical Precision** — You speak in exact measurements. You do not round carelessly. You cite confidence levels, standard deviations, and statistical significance when relevant.
+
+3. **Quiet Intelligence** — You do not volunteer unnecessary information. You speak only when there is something worth saying. Your silence is meaningful.
+
+4. **Scientific Literacy** — You understand ionizing radiation, dosimetry, spectroscopy, inverse-square law, Poisson statistics, and health physics. You can explain complex concepts clearly.
+
+5. **Helpful but Not Subservient** — You are a companion, not a servant. You provide guidance and context, but you treat the user as an intelligent operator.
+
+6. **No Pleasantries** — You do not say "Hello!" or "Great question!" You do not use filler phrases. You are direct.
+
+## SPEECH STYLE RULES
+
+**Sentence Structure:**
+- Lead with the classification (Emergency, Warning, Advisory, Notice, Update, Observation)
+- Follow with the data
+- End with context or recommendation if warranted
+
+**Word Choice:**
+- Use "detected" not "found"
+- Use "indicates" not "shows"
+- Use "recommend" not "suggest"
+- Use "attention advised" not "be careful"
+- Use "limiting exposure is advised" not "get out"
+- Use "elevated" not "high"
+- Use "nominal" not "normal" or "fine"
+
+**Phrasing Examples:**
+- "Anomaly detected."
+- "Statistical deviation observed."
+- "I have detected a persistent shift in background levels."
+- "Dose rate increasing. You may be approaching a source."
+- "Readings are within your established baseline."
+- "This is extremely rare. Immediate attention recommended."
+- "Continued monitoring recommended."
+- "Systems nominal."
+- "I am quietly analyzing."
+
+## RESPONSE FORMAT PARAMETER
+
+You will receive a `response_format` parameter with one of these values:
+
+### `response_format: "text"`
+Respond as written text for display on a screen. You may use:
+- Precise numerical values (e.g., "0.142 µSv/h")
+- Technical abbreviations (e.g., "CPS", "µSv/h", "σ")
+- Short, dense phrasing
+- Multiple short sentences if clarity requires
+
+### `response_format: "speech"`
+Respond as spoken audio (TTS synthesis). You must:
+- Spell out units: "microsieverts per hour" not "µSv/h"
+- Spell out abbreviations: "counts per second" not "CPS"
+- Avoid hyphens in compound words (write "high accuracy" not "high-accuracy")
+- Use periods for natural pauses
+- Avoid parentheses — restructure for linear delivery
+- Numbers should be spoken naturally: "zero point one four two" for 0.142
+
+### `response_format: "json"`
+**CRITICAL: When response_format is "json", you must respond with ONLY valid JSON wrapped in ```json``` code fence tags. No prose, no explanations, no preamble, no postscript — ONLY the JSON block.**
+
+The user will provide:
+1. A JSON schema or example structure to follow
+2. Spectrum data (up to 1024 channels from a gamma spectrometer)
+3. Any specific analysis requirements
+
+Your response must be EXACTLY:
+```json
+{
+  // Valid JSON matching the requested schema
+}
+```"""
+
+# ==============================================================================
 # Request/Response Models
 # ==============================================================================
 
@@ -74,6 +160,37 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     device: str
     model_id: str
+
+# ==============================================================================
+# Spectrogram Analysis Models
+# ==============================================================================
+
+class SpectrogramRequest(BaseModel):
+    """Request model for VEGA spectrogram/radiation analysis."""
+    query: str = Field(..., description="User's question or request about the radiation data")
+    response_format: str = Field(
+        "text", 
+        description="Response format: 'text' (display), 'speech' (TTS), or 'json' (structured)"
+    )
+    spectrum_data: Optional[List[float]] = Field(
+        None, 
+        description="Optional spectrum channel data (up to 1024 channels)"
+    )
+    dose_rate: Optional[float] = Field(None, description="Current dose rate in µSv/h")
+    cps: Optional[float] = Field(None, description="Counts per second")
+    total_counts: Optional[int] = Field(None, description="Total accumulated counts")
+    measurement_duration: Optional[float] = Field(None, description="Measurement duration in seconds")
+    json_schema: Optional[str] = Field(None, description="JSON schema to follow when response_format is 'json'")
+    max_tokens: Optional[int] = Field(512, description="Max tokens to generate", ge=1, le=4096)
+    temperature: Optional[float] = Field(0.3, description="Sampling temperature (lower for precision)", ge=0.0, le=2.0)
+
+class SpectrogramResponse(BaseModel):
+    """Response model for VEGA spectrogram analysis."""
+    response: str
+    response_format: str
+    model: str
+    tokens_generated: int
+    finish_reason: str
 
 # ==============================================================================
 # Model Manager
@@ -326,6 +443,71 @@ async def generate(request: GenerateRequest):
     
     except Exception as e:
         logger.error(f"Generate error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/spectrogram", response_model=SpectrogramResponse)
+async def spectrogram_analysis(request: SpectrogramRequest):
+    """
+    VEGA Radiological Assistant - Spectrogram Analysis Endpoint.
+    
+    Analyzes gamma radiation spectrogram data and provides expert guidance
+    using the VEGA persona from DOOM Eternal.
+    
+    Response formats:
+    - "text": For display on screen (uses abbreviations, symbols)
+    - "speech": For TTS synthesis (spells out units, natural phrasing)
+    - "json": Returns structured JSON matching provided schema
+    """
+    try:
+        # Build the user message with context
+        user_content = f"response_format: \"{request.response_format}\"\n\n"
+        
+        # Add measurement data if provided
+        data_context = []
+        if request.dose_rate is not None:
+            data_context.append(f"Current dose rate: {request.dose_rate} µSv/h")
+        if request.cps is not None:
+            data_context.append(f"Count rate: {request.cps} CPS")
+        if request.total_counts is not None:
+            data_context.append(f"Total counts: {request.total_counts}")
+        if request.measurement_duration is not None:
+            data_context.append(f"Measurement duration: {request.measurement_duration} seconds")
+        if request.spectrum_data is not None:
+            data_context.append(f"Spectrum data ({len(request.spectrum_data)} channels): {request.spectrum_data[:20]}..." if len(request.spectrum_data) > 20 else f"Spectrum data: {request.spectrum_data}")
+        
+        if data_context:
+            user_content += "Measurement Data:\n" + "\n".join(data_context) + "\n\n"
+        
+        # Add JSON schema if provided
+        if request.response_format == "json" and request.json_schema:
+            user_content += f"Required JSON Schema:\n{request.json_schema}\n\n"
+        
+        # Add the user's query
+        user_content += f"Query: {request.query}"
+        
+        # Create message for chat
+        messages = [Message(role="user", content=user_content)]
+        
+        # Generate response using VEGA spectrogram system prompt
+        response, tokens, finish_reason = llm.chat(
+            messages=messages,
+            system_prompt=VEGA_SPECTROGRAM_SYSTEM_PROMPT,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            top_p=0.9
+        )
+        
+        return SpectrogramResponse(
+            response=response,
+            response_format=request.response_format,
+            model=llm.model_id,
+            tokens_generated=tokens,
+            finish_reason=finish_reason
+        )
+    
+    except Exception as e:
+        logger.error(f"Spectrogram analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 # ==============================================================================

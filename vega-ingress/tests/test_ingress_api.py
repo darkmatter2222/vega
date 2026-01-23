@@ -299,6 +299,63 @@ class TestRunner:
         return result
     
     # ==========================================================================
+    # Spectrogram Analysis Tests (VEGA Radiological Assistant)
+    # ==========================================================================
+    
+    def test_spectrogram_text(self) -> TestResult:
+        """Test /spectrogram endpoint with text format."""
+        result = self._test(
+            "Spectrogram (text format)",
+            "POST",
+            "/spectrogram",
+            json={
+                "query": "What is the current radiation status?",
+                "response_format": "text",
+                "dose_rate": 0.142,
+                "cps": 12.5
+            },
+            timeout=60
+        )
+        if result.passed and result.response_data:
+            response = result.response_data.get("response", "")[:80]
+            result.message += f" [VEGA: '{response}...']"
+        return result
+    
+    def test_spectrogram_speech(self) -> TestResult:
+        """Test /spectrogram endpoint with speech format."""
+        result = self._test(
+            "Spectrogram (speech format)",
+            "POST",
+            "/spectrogram",
+            json={
+                "query": "Describe the current dose rate",
+                "response_format": "speech",
+                "dose_rate": 0.25
+            },
+            timeout=60
+        )
+        if result.passed and result.response_data:
+            fmt = result.response_data.get("response_format", "")
+            result.message += f" [format: {fmt}]"
+        return result
+    
+    def test_spectrogram_via_llm(self) -> TestResult:
+        """Test /llm/spectrogram endpoint."""
+        result = self._test(
+            "Spectrogram (via /llm)",
+            "POST",
+            "/llm/spectrogram",
+            json={
+                "query": "Is this radiation level safe?",
+                "response_format": "text",
+                "dose_rate": 0.08,
+                "cps": 5.2
+            },
+            timeout=60
+        )
+        return result
+    
+    # ==========================================================================
     # API Alias Tests
     # ==========================================================================
     
@@ -408,7 +465,16 @@ class TestRunner:
         self._run_and_print(self.test_generate_via_llm)
         print()
         
-        # Group 6: API Aliases
+        # Group 6: Spectrogram Analysis (VEGA Radiological Assistant)
+        print("─" * 50)
+        print("SPECTROGRAM ANALYSIS (VEGA Radiological)")
+        print("─" * 50)
+        self._run_and_print(self.test_spectrogram_text)
+        self._run_and_print(self.test_spectrogram_speech)
+        self._run_and_print(self.test_spectrogram_via_llm)
+        print()
+        
+        # Group 7: API Aliases
         print("─" * 50)
         print("API ALIASES")
         print("─" * 50)
@@ -416,7 +482,7 @@ class TestRunner:
         self._run_and_print(self.test_api_llm_alias)
         print()
         
-        # Group 7: Error Handling
+        # Group 8: Error Handling
         print("─" * 50)
         print("ERROR HANDLING")
         print("─" * 50)

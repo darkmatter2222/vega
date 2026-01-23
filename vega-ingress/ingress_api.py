@@ -209,6 +209,16 @@ async def generate(request: Request):
     """Direct route to LLM generate."""
     return await proxy_request(request, LLM_BACKEND, "generate")
 
+@app.post("/spectrogram")
+async def spectrogram(request: Request):
+    """
+    Direct route to VEGA spectrogram analysis.
+    
+    VEGA Radiological Assistant - analyzes gamma radiation data
+    and provides expert guidance using the VEGA persona.
+    """
+    return await proxy_request(request, LLM_BACKEND, "spectrogram")
+
 # ==============================================================================
 # Main
 # ==============================================================================

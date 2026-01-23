@@ -1,0 +1,35 @@
+# Vega Ingress - Docker Compose
+# API Gateway for Vega services
+
+services:
+  vega-ingress:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vega-ingress:latest
+    container_name: vega-ingress
+    restart: unless-stopped
+    
+    # Environment
+    environment:
+      # Point to host services (use host.docker.internal on Docker Desktop,
+      # or actual host IP on Linux)
+      - VEGA_TTS_BACKEND=http://172.17.0.1:8000
+      - VEGA_LLM_BACKEND=http://172.17.0.1:8001
+      - VEGA_BACKEND_TIMEOUT=120
+    
+    # Expose on port 8888 - this is the only port you need to forward
+    ports:
+      - "8888:8080"
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Add host access for Linux (Docker bridge network gateway)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

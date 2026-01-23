@@ -5,7 +5,7 @@ Vega Ingress API Test Suite
 Tests all endpoints via the ingress API gateway.
 
 Usage:
-    python test_ingress_api.py [--host HOST] [--port PORT] [--save-audio]
+    python test_ingress_api.py [--host HOST] [--port PORT] [--save-audio] [--verbose]
 """
 
 import argparse
@@ -13,9 +13,9 @@ import base64
 import json
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 try:
     import requests
@@ -47,12 +47,16 @@ class TestResult:
     duration_ms: float
     message: str
     response_data: Optional[dict] = None
+    request_data: Optional[dict] = field(default=None)
+    endpoint: str = ""
+    method: str = ""
 
 
 class TestRunner:
-    def __init__(self, base_url: str, save_audio: bool = False):
+    def __init__(self, base_url: str, save_audio: bool = False, verbose: bool = False):
         self.base_url = base_url
         self.save_audio = save_audio
+        self.verbose = verbose
         self.results: list[TestResult] = []
         self.output_dir = Path(__file__).parent / "output"
         
@@ -67,6 +71,8 @@ class TestRunner:
     def _test(self, name: str, method: str, endpoint: str, 
               expected_status: int = 200, **kwargs) -> TestResult:
         """Run a single test."""
+        request_payload = kwargs.get('json', kwargs.get('data', None))
+        
         start = time.perf_counter()
         try:
             response = self._make_request(method, endpoint, **kwargs)
@@ -83,16 +89,42 @@ class TestRunner:
             else:
                 msg = f"✗ Expected {expected_status}, got {response.status_code}"
             
-            result = TestResult(name, passed, duration, msg, data)
+            result = TestResult(name, passed, duration, msg, data, request_payload, endpoint, method)
             
         except requests.exceptions.ConnectionError as e:
             duration = (time.perf_counter() - start) * 1000
-            result = TestResult(name, False, duration, f"✗ Connection error: {e}", None)
+            result = TestResult(name, False, duration, f"✗ Connection error: {e}", None, request_payload, endpoint, method)
         except Exception as e:
             duration = (time.perf_counter() - start) * 1000
-            result = TestResult(name, False, duration, f"✗ Error: {e}", None)
+            result = TestResult(name, False, duration, f"✗ Error: {e}", None, request_payload, endpoint, method)
         
         self.results.append(result)
+        return result
+    
+    def _format_json(self, data: Any, max_length: int = 2000) -> str:
+        """Format JSON data for display, truncating if needed."""
+        if data is None:
+            return "None"
+        try:
+            formatted = json.dumps(data, indent=2, ensure_ascii=False)
+            if len(formatted) > max_length:
+                return formatted[:max_length] + "\n... [truncated]"
+            return formatted
+        except:
+            return str(data)[:max_length]
+    
+    def _truncate_audio_in_response(self, data: dict) -> dict:
+        """Create a copy of response with audio data truncated for display."""
+        if data is None:
+            return None
+        result = {}
+        for key, value in data.items():
+            if key in ('audio_base64', 'audio') and isinstance(value, str) and len(value) > 100:
+                result[key] = f"[{len(value)} chars - audio data]"
+            elif isinstance(value, dict):
+                result[key] = self._truncate_audio_in_response(value)
+            else:
+                result[key] = value
         return result
 
     # ==========================================================================
@@ -339,10 +371,111 @@ class TestRunner:
             result.message += f" [format: {fmt}]"
         return result
     
-    def test_spectrogram_via_llm(self) -> TestResult:
-        """Test /llm/spectrogram endpoint."""
+    def test_spectrogram_json(self) -> TestResult:
+        """Test /spectrogram endpoint with JSON structured output."""
+        json_schema = json.dumps({
+            "type": "object",
+            "properties": {
+                "status": {"type": "string"},
+                "dose_rate_usv_hr": {"type": "number"},
+                "safety_level": {"type": "string"},
+                "recommendation": {"type": "string"}
+            }
+        })
         result = self._test(
-            "Spectrogram (via /llm)",
+            "Spectrogram (JSON format)",
+            "POST",
+            "/spectrogram",
+            json={
+                "query": "Provide a structured analysis of the radiation data",
+                "response_format": "json",
+                "dose_rate": 0.35,
+                "cps": 28.7,
+                "total_counts": 1720,
+                "measurement_duration": 60.0,
+                "json_schema": json_schema
+            },
+            timeout=60
+        )
+        if result.passed and result.response_data:
+            fmt = result.response_data.get("response_format", "")
+            result.message += f" [format: {fmt}]"
+        return result
+    
+    def test_spectrogram_full_data(self) -> TestResult:
+        """Test /spectrogram with all available data fields including spectrum."""
+        # Simulated spectrum data (256 channels with a Cs-137 peak at channel 180)
+        spectrum_data = [0] * 256
+        for i in range(256):
+            # Background noise
+            spectrum_data[i] = max(0, int(5 + (50 - abs(i - 180)) * 2) if abs(i - 180) < 30 else 2)
+        
+        result = self._test(
+            "Spectrogram (full spectrum data)",
+            "POST",
+            "/spectrogram",
+            json={
+                "query": "Analyze this gamma spectrum and identify any isotopes present. Is this a Cs-137 source?",
+                "response_format": "text",
+                "dose_rate": 1.85,
+                "cps": 145.2,
+                "total_counts": 8712,
+                "measurement_duration": 60.0,
+                "spectrum_data": spectrum_data
+            },
+            timeout=90
+        )
+        if result.passed and result.response_data:
+            response = result.response_data.get("response", "")[:100]
+            result.message += f" [VEGA: '{response}...']"
+        return result
+    
+    def test_spectrogram_high_radiation(self) -> TestResult:
+        """Test /spectrogram with high radiation scenario for safety advisory."""
+        result = self._test(
+            "Spectrogram (high radiation alert)",
+            "POST",
+            "/spectrogram",
+            json={
+                "query": "Is this radiation level dangerous? What should I do?",
+                "response_format": "text",
+                "dose_rate": 125.0,  # High dose rate - above 100 µSv/h threshold
+                "cps": 8500.0
+            },
+            timeout=60
+        )
+        if result.passed and result.response_data:
+            response = result.response_data.get("response", "")
+            # Check if VEGA provides safety advisory for high radiation
+            if any(word in response.lower() for word in ["caution", "warning", "evacuate", "distance", "safe", "danger"]):
+                result.message += " [Safety advisory detected]"
+            else:
+                result.message += f" [Response: '{response[:60]}...']"
+        return result
+    
+    def test_spectrogram_low_radiation(self) -> TestResult:
+        """Test /spectrogram with background radiation levels."""
+        result = self._test(
+            "Spectrogram (background levels)",
+            "POST",
+            "/spectrogram",
+            json={
+                "query": "Is this normal background radiation?",
+                "response_format": "text",
+                "dose_rate": 0.08,  # Normal background ~0.05-0.2 µSv/h
+                "cps": 3.2
+            },
+            timeout=60
+        )
+        if result.passed and result.response_data:
+            response = result.response_data.get("response", "")[:80]
+            result.message += f" [VEGA: '{response}...']"
+        return result
+    
+    def test_spectrogram_via_llm(self) -> TestResult:
+        """Test /llm/spectrogram endpoint (proxy path)."""
+        result = self._test(
+            "Spectrogram (via /llm proxy)",
             "POST",
             "/llm/spectrogram",
             json={
@@ -353,6 +486,52 @@ class TestRunner:
             },
             timeout=60
         )
+        return result
+    
+    def test_spectrogram_minimal_query(self) -> TestResult:
+        """Test /spectrogram with minimal input (just query, no radiation data)."""
+        result = self._test(
+            "Spectrogram (minimal - query only)",
+            "POST",
+            "/spectrogram",
+            json={
+                "query": "What are typical background radiation levels?"
+            },
+            timeout=60
+        )
+        if result.passed and result.response_data:
+            response = result.response_data.get("response", "")[:80]
+            result.message += f" [VEGA: '{response}...']"
+        return result
+    
+    def test_spectrogram_response_fields(self) -> TestResult:
+        """Test that /spectrogram returns all expected response fields."""
+        result = self._test(
+            "Spectrogram (response validation)",
+            "POST",
+            "/spectrogram",
+            json={
+                "query": "Analyze this reading",
+                "response_format": "text",
+                "dose_rate": 0.5,
+                "cps": 42.0
+            },
+            timeout=60
+        )
+        if result.passed and result.response_data:
+            data = result.response_data
+            has_response = "response" in data
+            has_format = "response_format" in data
+            has_model = "model" in data
+            
+            if has_response and has_format and has_model:
+                result.message += f" [All fields present: model={data.get('model', 'N/A')[:20]}]"
+            else:
+                missing = []
+                if not has_response: missing.append("response")
+                if not has_format: missing.append("response_format")
+                if not has_model: missing.append("model")
+                result.message += f" [Missing fields: {', '.join(missing)}]"
         return result
     
     # ==========================================================================
@@ -471,7 +650,13 @@ class TestRunner:
         print("─" * 50)
         self._run_and_print(self.test_spectrogram_text)
         self._run_and_print(self.test_spectrogram_speech)
+        self._run_and_print(self.test_spectrogram_json)
+        self._run_and_print(self.test_spectrogram_full_data)
+        self._run_and_print(self.test_spectrogram_high_radiation)
+        self._run_and_print(self.test_spectrogram_low_radiation)
         self._run_and_print(self.test_spectrogram_via_llm)
+        self._run_and_print(self.test_spectrogram_minimal_query)
+        self._run_and_print(self.test_spectrogram_response_fields)
         print()
         
         # Group 7: API Aliases
@@ -500,6 +685,31 @@ class TestRunner:
         status = "PASS" if result.passed else "FAIL"
         print(f"  [{status}] {result.name}")
         print(f"         {result.message}")
+        
+        # Verbose mode - show full request/response
+        if self.verbose:
+            print()
+            print(f"         ┌─ REQUEST ─────────────────────────────────────")
+            print(f"         │ {result.method} {self.base_url}{result.endpoint}")
+            if result.request_data:
+                req_json = self._format_json(result.request_data)
+                for line in req_json.split('\n'):
+                    print(f"         │ {line}")
+            else:
+                print(f"         │ (no body)")
+            print(f"         └──────────────────────────────────────────────")
+            print()
+            print(f"         ┌─ RESPONSE ────────────────────────────────────")
+            if result.response_data:
+                # Truncate audio data for display
+                display_data = self._truncate_audio_in_response(result.response_data)
+                resp_json = self._format_json(display_data)
+                for line in resp_json.split('\n'):
+                    print(f"         │ {line}")
+            else:
+                print(f"         │ (no response data)")
+            print(f"         └──────────────────────────────────────────────")
+            print()
     
     def _print_summary(self) -> bool:
         """Print test summary and return True if all passed."""
@@ -564,11 +774,16 @@ def main():
         action="store_true",
         help="Run only health check tests (fast)"
     )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Show detailed request/response for each test"
+    )
     
     args = parser.parse_args()
     
     base_url = f"http://{args.host}:{args.port}"
-    runner = TestRunner(base_url, save_audio=args.save_audio)
+    runner = TestRunner(base_url, save_audio=args.save_audio, verbose=args.verbose)
     
     if args.quick:
         # Quick mode - just health checks

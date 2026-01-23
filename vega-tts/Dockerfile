@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
     git \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

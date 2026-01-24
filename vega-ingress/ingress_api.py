@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Vega Ingress - API Gateway / Reverse Proxy
-Routes requests to appropriate backend services (TTS, LLM)
+Routes requests to appropriate backend services (TTS, LLM, Isotope Identification)
 """
 
 import os
@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # Backend service URLs (internal Docker network or localhost)
 TTS_BACKEND = os.getenv("VEGA_TTS_BACKEND", "http://host.docker.internal:8010")
 LLM_BACKEND = os.getenv("VEGA_LLM_BACKEND", "http://host.docker.internal:8001")
+ISOTOPE_BACKEND = os.getenv("VEGA_ISOTOPE_BACKEND", "http://host.docker.internal:8020")
 
 # Timeout for backend requests (seconds)
 BACKEND_TIMEOUT = float(os.getenv("VEGA_BACKEND_TIMEOUT", "120"))
@@ -35,8 +36,8 @@ BACKEND_TIMEOUT = float(os.getenv("VEGA_BACKEND_TIMEOUT", "120"))
 
 app = FastAPI(
     title="Vega Ingress",
-    description="API Gateway for Vega services (TTS, LLM)",
-    version="1.0.0"
+    description="API Gateway for Vega services (TTS, LLM, Isotope Identification)",
+    version="1.1.0"
 )
 
 # CORS - allow all for now
@@ -74,6 +75,13 @@ async def health_check():
     except Exception as e:
         backends["llm"] = {"status": "unreachable", "error": str(e)}
     
+    # Check Isotope Identification
+    try:
+        resp = await http_client.get(f"{ISOTOPE_BACKEND}/health", timeout=5)
+        backends["isotope"] = resp.json() if resp.status_code == 200 else {"status": "error", "code": resp.status_code}
+    except Exception as e:
+        backends["isotope"] = {"status": "unreachable", "error": str(e)}
+    
     all_healthy = all(
         b.get("status") in ["healthy", "ok"] 
         for b in backends.values()
@@ -89,16 +97,19 @@ async def get_info():
     """Get information about available services."""
     return {
         "service": "vega-ingress",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "routes": {
             "/tts/*": "Text-to-Speech service",
             "/llm/*": "Language Model service",
+            "/isotope/*": "Isotope Identification service",
             "/api/tts/*": "Alias for TTS",
             "/api/llm/*": "Alias for LLM",
+            "/api/isotope/*": "Alias for Isotope Identification",
         },
         "backends": {
             "tts": TTS_BACKEND,
-            "llm": LLM_BACKEND
+            "llm": LLM_BACKEND,
+            "isotope": ISOTOPE_BACKEND
         }
     }
 
@@ -218,6 +229,46 @@ async def spectrogram(request: Request):
     and provides expert guidance using the VEGA persona.
     """
     return await proxy_request(request, LLM_BACKEND, "spectrogram")
+
+# ==============================================================================
+# Isotope Identification Routes
+# ==============================================================================
+
+@app.api_route("/isotope/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def proxy_isotope(request: Request, path: str):
+    """Proxy requests to Isotope Identification service."""
+    return await proxy_request(request, ISOTOPE_BACKEND, path)
+
+@app.api_route("/api/isotope/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+async def proxy_api_isotope(request: Request, path: str):
+    """Alias: Proxy requests to Isotope Identification service."""
+    return await proxy_request(request, ISOTOPE_BACKEND, path)
+
+# Direct convenience routes for isotope identification
+@app.post("/identify")
+async def identify(request: Request):
+    """
+    Direct route to isotope identification.
+    
+    Accepts a gamma spectrum (1023 channels) and returns
+    identified isotopes with probabilities and estimated activities.
+    """
+    return await proxy_request(request, ISOTOPE_BACKEND, "identify")
+
+@app.post("/identify/b64")
+async def identify_b64(request: Request):
+    """Direct route to isotope identification with base64-encoded numpy array."""
+    return await proxy_request(request, ISOTOPE_BACKEND, "identify/b64")
+
+@app.post("/identify/batch")
+async def identify_batch(request: Request):
+    """Direct route to batch isotope identification."""
+    return await proxy_request(request, ISOTOPE_BACKEND, "identify/batch")
+
+@app.get("/isotopes")
+async def list_isotopes(request: Request):
+    """Direct route to list all supported isotopes."""
+    return await proxy_request(request, ISOTOPE_BACKEND, "isotopes")
 
 # ==============================================================================
 # Main

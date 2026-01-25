@@ -37,7 +37,7 @@ BACKEND_TIMEOUT = float(os.getenv("VEGA_BACKEND_TIMEOUT", "120"))
 app = FastAPI(
     title="Vega Ingress",
     description="API Gateway for Vega services (TTS, LLM, Isotope Identification)",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 # CORS - allow all for now
@@ -97,11 +97,11 @@ async def get_info():
     """Get information about available services."""
     return {
         "service": "vega-ingress",
-        "version": "1.1.0",
+        "version": "1.2.0",
         "routes": {
             "/tts/*": "Text-to-Speech service",
             "/llm/*": "Language Model service",
-            "/isotope/*": "Isotope Identification service",
+            "/isotope/*": "Isotope Identification service (v2.0 - 2D model)",
             "/api/tts/*": "Alias for TTS",
             "/api/llm/*": "Alias for LLM",
             "/api/isotope/*": "Alias for Isotope Identification",
@@ -248,12 +248,24 @@ async def proxy_api_isotope(request: Request, path: str):
 @app.post("/identify")
 async def identify(request: Request):
     """
-    Direct route to isotope identification.
+    Direct route to isotope identification (2D model).
     
-    Accepts a gamma spectrum (1023 channels) and returns
+    Accepts a 2D gamma spectrum (60 time intervals × 1023 channels) and returns
     identified isotopes with probabilities and estimated activities.
+    
+    API v2.0: Input shape is now (60, 1023) for improved accuracy.
     """
     return await proxy_request(request, ISOTOPE_BACKEND, "identify")
+
+@app.post("/identify/1d")
+async def identify_1d(request: Request):
+    """
+    Direct route to isotope identification (legacy 1D support).
+    
+    Accepts a 1D gamma spectrum (1023 channels) which is automatically
+    expanded to 2D by the backend.
+    """
+    return await proxy_request(request, ISOTOPE_BACKEND, "identify/1d")
 
 @app.post("/identify/b64")
 async def identify_b64(request: Request):

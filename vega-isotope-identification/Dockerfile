@@ -1,8 +1,9 @@
 # ==============================================================================
-# Vega Isotope Identification API - Docker Image
+# Vega 2D Isotope Identification API - Docker Image
 # ==============================================================================
 # Multi-stage build for smaller final image
 # Supports both GPU and CPU inference
+# Model: 2D CNN (60 time intervals × 1023 energy channels)
 
 FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime AS base
 
@@ -38,12 +39,11 @@ FROM dependencies AS final
 # Copy application code
 COPY isotope_api.py .
 
-# Copy model files (these should be mounted or baked in)
-# For production, mount these as volumes instead
-COPY models/vega_v2_final.pt /app/models/vega_v2_final.pt
+# Copy 2D model file (mount as volume for production)
+COPY models/vega_2d_final.pt /app/models/vega_2d_final.pt
 
-# Environment variables
-ENV VEGA_ISOTOPE_MODEL=/app/models/vega_v2_final.pt
+# Environment variables for 2D model
+ENV VEGA_ISOTOPE_MODEL=/app/models/vega_2d_final.pt
 ENV VEGA_DEVICE=cuda
 ENV VEGA_DEFAULT_THRESHOLD=0.5
 

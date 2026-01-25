@@ -534,10 +534,449 @@ class TestRunner:
                 result.message += f" [Missing fields: {', '.join(missing)}]"
         return result
     
+    def test_spectrogram_isotope_identification(self) -> TestResult:
+        """Test isotope identification from raw 1024-channel spectrum data."""
+        import math
+        import random
+        
+        # Generate synthetic 1024-channel gamma spectrum
+        # Calibration: 3 keV per channel (channel 0 = 0 keV, channel 1023 = 3069 keV)
+        num_channels = 1024
+        kev_per_channel = 3.0
+        accumulation_time_seconds = 300.0  # 5 minute acquisition
+        
+        # Initialize with exponential background (Compton continuum)
+        spectrum = []
+        for ch in range(num_channels):
+            background = 50 * math.exp(-ch / 300)  # Exponential falloff
+            spectrum.append(max(1, int(background)))
+        
+        # Add Gaussian peaks for isotopes
+        def add_peak(spectrum, energy_kev, amplitude, fwhm_kev=15):
+            """Add a Gaussian peak at the given energy."""
+            center_channel = int(energy_kev / kev_per_channel)
+            sigma = fwhm_kev / (2.355 * kev_per_channel)  # FWHM to sigma
+            for ch in range(max(0, center_channel - 50), min(num_channels, center_channel + 50)):
+                gaussian = amplitude * math.exp(-0.5 * ((ch - center_channel) / sigma) ** 2)
+                spectrum[ch] += int(gaussian)
+        
+        # Add isotope peaks:
+        # Am-241: 59.5 keV (channel ~20)
+        add_peak(spectrum, 59.5, amplitude=350, fwhm_kev=12)
+        # Cs-137: 662 keV (channel ~221)
+        add_peak(spectrum, 662, amplitude=800, fwhm_kev=18)
+        # Co-60: 1173 keV and 1332 keV (channels ~391 and ~444)
+        add_peak(spectrum, 1173, amplitude=400, fwhm_kev=20)
+        add_peak(spectrum, 1332, amplitude=350, fwhm_kev=20)
+        # K-40: 1461 keV (channel ~487)
+        add_peak(spectrum, 1461, amplitude=150, fwhm_kev=22)
+        
+        # Add Poisson noise
+        random.seed(42)  # Reproducible
+        spectrum = [max(0, int(c + random.gauss(0, math.sqrt(max(1, c))))) for c in spectrum]
+        
+        # Build the prompt with raw spectrum data
+        # Format as compact representation to fit in context
+        spectrum_str = ",".join(str(c) for c in spectrum)
+        
+        prompt = f"""GAMMA SPECTRUM ANALYSIS TASK
+
+RAW SPECTRUM DATA:
+- Channels: 1024 (0 to 1023)
+- Calibration: {kev_per_channel} keV per channel
+- Accumulation time: {accumulation_time_seconds} seconds
+- Counts per channel (channel 0 to 1023):
+[{spectrum_str}]
+
+ISOTOPE REFERENCE TABLE:
+| Isotope | Gamma Energy (keV) |
+|---------|--------------------|
+| Am-241  | 59.5               |
+| Cs-137  | 662                |
+| Co-60   | 1173, 1332         |
+| K-40    | 1461               |
+| Na-22   | 511, 1275          |
+| Ba-133  | 356, 81            |
+
+TASK:
+1. Find peaks in the spectrum (channels with significantly elevated counts above background)
+2. Convert peak channel numbers to energy using: Energy (keV) = Channel × {kev_per_channel}
+3. Match peaks to the reference table isotopes
+4. Report each identified isotope with confidence percentage:
+   - Peak within 10 keV of reference = 95% confidence
+   - Peak within 20 keV of reference = 85% confidence
+   - Peak within 30 keV of reference = 70% confidence
+
+OUTPUT FORMAT (one line per isotope):
+Isotope: [name] | Energy: [X] keV | Confidence: [Y]%"""
+
+        result = self._test(
+            "Spectrogram (raw 1024-ch isotope ID)",
+            "POST",
+            "/llm/chat",
+            json={
+                "messages": [
+                    {"role": "system", "content": "You are a gamma spectroscopy expert. Analyze raw spectrum data to identify isotopes."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 500,
+                "temperature": 0.1
+            },
+            timeout=90
+        )
+        if result.passed and result.response_data:
+            response = result.response_data.get("response", "").lower()
+            # Check for expected isotopes
+            found_isotopes = []
+            if "cs-137" in response or "cesium" in response:
+                found_isotopes.append("Cs-137")
+            if "co-60" in response or "cobalt" in response:
+                found_isotopes.append("Co-60")
+            if "k-40" in response or "potassium" in response:
+                found_isotopes.append("K-40")
+            if "am-241" in response or "americium" in response:
+                found_isotopes.append("Am-241")
+            
+            # Check for confidence percentages
+            has_confidence = "%" in response or "confidence" in response
+            
+            if len(found_isotopes) >= 3 and has_confidence:
+                result.message += f" [Identified: {', '.join(found_isotopes)} with confidence %]"
+            elif len(found_isotopes) >= 2:
+                result.message += f" [Partial: {', '.join(found_isotopes)}]"
+            else:
+                result.message += f" [Found {len(found_isotopes)} isotopes]"
+        return result
+    
     # ==========================================================================
     # API Alias Tests
     # ==========================================================================
     
+    def _generate_spectrum(self, isotopes: list, num_channels: int = 1024, 
+                           kev_per_channel: float = 3.0, include_background: bool = True,
+                           include_noise: bool = True) -> tuple[list, dict]:
+        """
+        Generate a synthetic gamma spectrum with specified isotopes.
+        
+        Args:
+            isotopes: List of dicts with 'name', 'energies' (list of keV), 'amplitude'
+            num_channels: Number of spectrum channels
+            kev_per_channel: Energy calibration
+            include_background: Whether to add exponential Compton background
+            include_noise: Whether to add Poisson statistical noise
+            
+        Returns:
+            (spectrum_counts, metadata_dict)
+        """
+        import math
+        import random
+        random.seed(42)  # Reproducible results
+        
+        # Initialize spectrum
+        spectrum = [0] * num_channels
+        
+        # Add exponential background (Compton continuum)
+        if include_background:
+            for ch in range(num_channels):
+                background = 50 * math.exp(-ch / 300)
+                spectrum[ch] = max(1, int(background))
+        else:
+            spectrum = [1] * num_channels  # Minimal baseline
+        
+        # Add Gaussian peaks for each isotope
+        def add_peak(energy_kev, amplitude, fwhm_kev=15):
+            center_channel = int(energy_kev / kev_per_channel)
+            sigma = fwhm_kev / (2.355 * kev_per_channel)
+            for ch in range(max(0, center_channel - 50), min(num_channels, center_channel + 50)):
+                gaussian = amplitude * math.exp(-0.5 * ((ch - center_channel) / sigma) ** 2)
+                spectrum[ch] += int(gaussian)
+        
+        expected_isotopes = []
+        for isotope in isotopes:
+            for energy in isotope['energies']:
+                add_peak(energy, isotope['amplitude'], isotope.get('fwhm', 15))
+            expected_isotopes.append(isotope['name'])
+        
+        # Add Poisson noise
+        if include_noise:
+            spectrum = [max(0, int(c + random.gauss(0, math.sqrt(max(1, c))))) for c in spectrum]
+        
+        metadata = {
+            'num_channels': num_channels,
+            'kev_per_channel': kev_per_channel,
+            'expected_isotopes': expected_isotopes,
+            'include_background': include_background,
+            'include_noise': include_noise
+        }
+        
+        return spectrum, metadata
+    
+    def _run_isotope_identification(self, spectrum: list, metadata: dict, 
+                                     test_name: str, accumulation_time: float = 300.0, variant: str = "baseline") -> TestResult:
+        """Run isotope identification on a spectrum and return test result. Variant controls prompt/strategy."""
+        spectrum_str = ",".join(str(c) for c in spectrum)
+
+        # Variant prompt engineering
+        if variant == "baseline":
+            prompt = f"""GAMMA SPECTRUM ANALYSIS TASK\n\nRAW SPECTRUM DATA:\n- Channels: {metadata['num_channels']} (0 to {metadata['num_channels']-1})\n- Calibration: {metadata['kev_per_channel']} keV per channel\n- Accumulation time: {accumulation_time} seconds\n- Counts per channel:\n[{spectrum_str}]\n\nISOTOPE REFERENCE TABLE:\n| Isotope | Gamma Energy (keV) |\n|---------|--------------------|\n| Am-241  | 59.5               |\n| Cs-137  | 662                |\n| Co-60   | 1173, 1332         |\n| K-40    | 1461               |\n| Na-22   | 511, 1275          |\n| Ba-133  | 81, 356            |\n| I-131   | 364                |\n| Ra-226  | 186                |\n\nTASK:\n1. Find peaks in the spectrum (channels with elevated counts above background)\n2. Convert peak channels to energy: Energy (keV) = Channel × {metadata['kev_per_channel']}\n3. Match peaks to reference isotopes (within 20 keV tolerance)\n4. List ONLY isotopes that have matching peaks in the data\n\nOUTPUT FORMAT (one line per identified isotope):\nIsotope: [name] | Energy: [X] keV | Confidence: [Y]%"""
+            system = "You are a gamma spectroscopy expert. Identify ONLY isotopes with peaks present in the spectrum data. Do not list isotopes without matching peaks."
+        elif variant == "step_by_step":
+            prompt = f"""You are given a gamma spectrum.\n\nRAW SPECTRUM DATA:\n- Channels: {metadata['num_channels']} (0 to {metadata['num_channels']-1})\n- Calibration: {metadata['kev_per_channel']} keV per channel\n- Accumulation time: {accumulation_time} seconds\n- Counts per channel:\n[{spectrum_str}]\n\nISOTOPE REFERENCE TABLE:\n| Isotope | Gamma Energy (keV) |\n|---------|--------------------|\n| Am-241  | 59.5               |\n| Cs-137  | 662                |\n| Co-60   | 1173, 1332         |\n| K-40    | 1461               |\n| Na-22   | 511, 1275          |\n| Ba-133  | 81, 356            |\n| I-131   | 364                |\n| Ra-226  | 186                |\n\nTASK: Step by step, first find peaks, then convert to energy, then match to isotopes, then output only those isotopes with a matching peak.\n\nOutput as: Isotope: [name] | Energy: [X] keV | Confidence: [Y]%"""
+            system = "You are a gamma spectroscopy expert. Think step by step."
+        elif variant == "few_shot":
+            # Add a few-shot example (short spectrum, correct answer)
+            example_spectrum = "[1,2,1,1,10,20,10,1,1,2,1]"
+            example_prompt = f"RAW SPECTRUM DATA:\n- Channels: 11 (0 to 10)\n- Calibration: 10 keV per channel\n- Counts per channel:\n{example_spectrum}\n\nISOTOPE REFERENCE TABLE:\n| Isotope | Gamma Energy (keV) |\n|---------|--------------------|\n| X-100   | 50                 |\n| Y-200   | 100                |\n\nTASK: Find peaks, match to isotopes.\n\nOUTPUT FORMAT:\nIsotope: X-100 | Energy: 50 keV | Confidence: 95%"
+            prompt = f"{example_prompt}\n\n---\n\nNow analyze this spectrum:\n\nRAW SPECTRUM DATA:\n- Channels: {metadata['num_channels']} (0 to {metadata['num_channels']-1})\n- Calibration: {metadata['kev_per_channel']} keV per channel\n- Accumulation time: {accumulation_time} seconds\n- Counts per channel:\n[{spectrum_str}]\n\nISOTOPE REFERENCE TABLE:\n| Isotope | Gamma Energy (keV) |\n|---------|--------------------|\n| Am-241  | 59.5               |\n| Cs-137  | 662                |\n| Co-60   | 1173, 1332         |\n| K-40    | 1461               |\n| Na-22   | 511, 1275          |\n| Ba-133  | 81, 356            |\n| I-131   | 364                |\n| Ra-226  | 186                |\n\nTASK: Find peaks, match to isotopes.\n\nOUTPUT FORMAT (one line per identified isotope):\nIsotope: [name] | Energy: [X] keV | Confidence: [Y]%"
+            system = "You are a gamma spectroscopy expert."
+        elif variant == "peaks_only":
+            # Preprocess: find peaks, send only peak energies/counts
+            import numpy as np
+            from scipy.signal import find_peaks
+            arr = np.array(spectrum)
+            peaks, _ = find_peaks(arr, height=max(arr)*0.2, distance=10)
+            peak_energies = [round(p * metadata['kev_per_channel'], 1) for p in peaks]
+            peak_counts = [int(arr[p]) for p in peaks]
+            peaks_table = "\n".join([f"| {i+1} | {e} | {c} |" for i, (e, c) in enumerate(zip(peak_energies, peak_counts))])
+            prompt = f"""GAMMA SPECTRUM PEAKS\n\nPEAKS TABLE:\n| # | Energy (keV) | Counts |\n|---|--------------|--------|\n{peaks_table}\n\nISOTOPE REFERENCE TABLE:\n| Isotope | Gamma Energy (keV) |\n|---------|--------------------|\n| Am-241  | 59.5               |\n| Cs-137  | 662                |\n| Co-60   | 1173, 1332         |\n| K-40    | 1461               |\n| Na-22   | 511, 1275          |\n| Ba-133  | 81, 356            |\n| I-131   | 364                |\n| Ra-226  | 186                |\n\nTASK: Match each peak to the reference table. Only list isotopes with a matching peak.\n\nOUTPUT FORMAT (one line per identified isotope):\nIsotope: [name] | Energy: [X] keV | Confidence: [Y]%"""
+            system = "You are a gamma spectroscopy expert. Only list isotopes with a matching peak."
+        else:
+            # fallback to baseline
+            prompt = f"RAW SPECTRUM DATA:\n[{spectrum_str}]"
+            system = "You are a gamma spectroscopy expert."
+
+        result = self._test(
+            f"{test_name} [{variant}]",
+            "POST",
+            "/llm/chat",
+            json={
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 400,
+                "temperature": 0.1
+            },
+            timeout=90
+        )
+        
+        # Analyze results for benchmark metrics
+        if result.passed and result.response_data:
+            response = result.response_data.get("response", "").lower()
+            expected = set(metadata['expected_isotopes'])
+            
+            # Detect isotopes in response
+            found = set()
+            isotope_patterns = {
+                'Am-241': ['am-241', 'americium', 'am241'],
+                'Cs-137': ['cs-137', 'cesium', 'cs137'],
+                'Co-60': ['co-60', 'cobalt', 'co60'],
+                'K-40': ['k-40', 'potassium', 'k40'],
+                'Na-22': ['na-22', 'sodium', 'na22'],
+                'Ba-133': ['ba-133', 'barium', 'ba133'],
+                'I-131': ['i-131', 'iodine', 'i131'],
+                'Ra-226': ['ra-226', 'radium', 'ra226']
+            }
+            
+            for isotope, patterns in isotope_patterns.items():
+                if any(p in response for p in patterns):
+                    found.add(isotope)
+            
+            # Calculate metrics
+            true_positives = expected & found
+            false_positives = found - expected
+            false_negatives = expected - found
+            
+            result.response_data['_benchmark'] = {
+                'expected': list(expected),
+                'found': list(found),
+                'true_positives': list(true_positives),
+                'false_positives': list(false_positives),
+                'false_negatives': list(false_negatives)
+            }
+            
+            if not false_positives and not false_negatives:
+                result.message += f" [PERFECT: {','.join(sorted(found))}]"
+            else:
+                parts = []
+                if true_positives:
+                    parts.append(f"✓{','.join(sorted(true_positives))}")
+                if false_positives:
+                    parts.append(f"+{','.join(sorted(false_positives))}")
+                if false_negatives:
+                    parts.append(f"-{','.join(sorted(false_negatives))}")
+                result.message += f" [{' '.join(parts)}]"
+        
+        return result
+    
+    def run_isotope_benchmark(self) -> dict:
+        """
+        Run a benchmark suite of 10 isotope identification tests for each prompt/preprocessing variant.
+        Returns benchmark statistics for all variants.
+        """
+        print("=" * 70)
+        print("ISOTOPE IDENTIFICATION BENCHMARK SUITE (Prompt/Preprocessing Variants)")
+        print("=" * 70)
+        print()
+
+        variants = [
+            "baseline",
+            "step_by_step",
+            "few_shot",
+            "peaks_only"
+        ]
+
+        test_cases = [
+            ("Cs-137 Only (bg)", [{'name': 'Cs-137', 'energies': [662], 'amplitude': 800}], True, True),
+            ("Co-60 Only (bg)", [{'name': 'Co-60', 'energies': [1173, 1332], 'amplitude': 400}], True, True),
+            ("Am-241 Only (bg)", [{'name': 'Am-241', 'energies': [59.5], 'amplitude': 500}], True, True),
+            ("Cs-137 Only (clean)", [{'name': 'Cs-137', 'energies': [662], 'amplitude': 800}], False, False),
+            ("Cs-137 + Co-60 (bg)", [
+                {'name': 'Cs-137', 'energies': [662], 'amplitude': 700},
+                {'name': 'Co-60', 'energies': [1173, 1332], 'amplitude': 350}
+            ], True, True),
+            ("Am-241 + Cs-137 + K-40 (bg)", [
+                {'name': 'Am-241', 'energies': [59.5], 'amplitude': 400},
+                {'name': 'Cs-137', 'energies': [662], 'amplitude': 600},
+                {'name': 'K-40', 'energies': [1461], 'amplitude': 200}
+            ], True, True),
+            ("4 Isotopes (bg)", [
+                {'name': 'Am-241', 'energies': [59.5], 'amplitude': 350},
+                {'name': 'Cs-137', 'energies': [662], 'amplitude': 800},
+                {'name': 'Co-60', 'energies': [1173, 1332], 'amplitude': 400},
+                {'name': 'K-40', 'energies': [1461], 'amplitude': 150}
+            ], True, True),
+            ("Na-22 Only (bg)", [{'name': 'Na-22', 'energies': [511, 1275], 'amplitude': 450}], True, True),
+            ("Ba-133 + I-131 (bg)", [
+                {'name': 'Ba-133', 'energies': [81, 356], 'amplitude': 500},
+                {'name': 'I-131', 'energies': [364], 'amplitude': 600}
+            ], True, True),
+            ("5 Isotopes (no bg)", [
+                {'name': 'Am-241', 'energies': [59.5], 'amplitude': 400},
+                {'name': 'Cs-137', 'energies': [662], 'amplitude': 700},
+                {'name': 'Co-60', 'energies': [1173, 1332], 'amplitude': 350},
+                {'name': 'Na-22', 'energies': [511, 1275], 'amplitude': 300},
+                {'name': 'K-40', 'energies': [1461], 'amplitude': 200}
+            ], False, True)
+        ]
+
+        all_results = {v: [] for v in variants}
+
+        for variant in variants:
+            print(f"\n{'='*30}\nVARIANT: {variant}\n{'='*30}")
+            for name, iso, bg, noise in test_cases:
+                print("─" * 50)
+                print(f"TEST: {name}")
+                print("─" * 50)
+                spectrum, meta = self._generate_spectrum(iso, include_background=bg, include_noise=noise)
+                result = self._run_isotope_identification(spectrum, meta, name, variant=variant)
+                self._print_benchmark_result(result)
+                all_results[variant].append(result)
+                print()
+        # Print summary for each variant
+        for variant in variants:
+            print(f"\n{'='*30}\nSUMMARY FOR VARIANT: {variant}\n{'='*30}")
+            self._print_benchmark_summary(all_results[variant])
+        return all_results
+    
+    def _print_benchmark_result(self, result: TestResult):
+        """Print a single benchmark test result."""
+        status = "PASS" if result.passed else "FAIL"
+        print(f"  [{status}] {result.name}")
+        print(f"         {result.message}")
+        
+        if self.verbose and result.response_data:
+            response = result.response_data.get("response", "")[:500]
+            print(f"         Response: {response}")
+        print()
+    
+    def _print_benchmark_summary(self, results: list) -> dict:
+        """Print benchmark summary statistics."""
+        print("=" * 70)
+        print("BENCHMARK SUMMARY")
+        print("=" * 70)
+        
+        total_tests = len(results)
+        passed_tests = sum(1 for r in results if r.passed)
+        
+        # Aggregate benchmark metrics
+        total_expected = 0
+        total_tp = 0
+        total_fp = 0
+        total_fn = 0
+        perfect_scores = 0
+        
+        print("\nDetailed Results:")
+        print("-" * 70)
+        print(f"{'Test':<40} {'Expected':<15} {'Result':<15}")
+        print("-" * 70)
+        
+        for r in results:
+            if r.response_data and '_benchmark' in r.response_data:
+                b = r.response_data['_benchmark']
+                expected_str = ','.join(sorted(b['expected']))
+                
+                if b['false_positives'] or b['false_negatives']:
+                    result_parts = []
+                    if b['true_positives']:
+                        result_parts.append(f"✓{','.join(sorted(b['true_positives']))}")
+                    if b['false_positives']:
+                        result_parts.append(f"+{','.join(sorted(b['false_positives']))}")
+                    if b['false_negatives']:
+                        result_parts.append(f"-{','.join(sorted(b['false_negatives']))}")
+                    result_str = ' '.join(result_parts)
+                else:
+                    result_str = "✓ PERFECT"
+                    perfect_scores += 1
+                
+                total_expected += len(b['expected'])
+                total_tp += len(b['true_positives'])
+                total_fp += len(b['false_positives'])
+                total_fn += len(b['false_negatives'])
+                
+                print(f"{r.name:<40} {expected_str:<15} {result_str:<15}")
+        
+        print("-" * 70)
+        print()
+        
+        # Calculate metrics
+        accuracy = total_tp / total_expected if total_expected > 0 else 0
+        precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0
+        recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        
+        total_time = sum(r.duration_ms for r in results)
+        
+        print("AGGREGATE METRICS:")
+        print(f"  Tests Passed:     {passed_tests}/{total_tests}")
+        print(f"  Perfect Scores:   {perfect_scores}/{total_tests}")
+        print(f"  True Positives:   {total_tp}")
+        print(f"  False Positives:  {total_fp}")
+        print(f"  False Negatives:  {total_fn}")
+        print()
+        print(f"  Accuracy:         {accuracy:.1%} (correct IDs / expected)")
+        print(f"  Precision:        {precision:.1%} (correct IDs / all IDs)")
+        print(f"  Recall:           {recall:.1%} (correct IDs / expected)")
+        print(f"  F1 Score:         {f1:.1%}")
+        print()
+        print(f"  Total Time:       {total_time:.0f}ms ({total_time/1000:.2f}s)")
+        print(f"  Avg per Test:     {total_time/total_tests:.0f}ms")
+        print("=" * 70)
+        
+        return {
+            'total_tests': total_tests,
+            'passed_tests': passed_tests,
+            'perfect_scores': perfect_scores,
+            'true_positives': total_tp,
+            'false_positives': total_fp,
+            'false_negatives': total_fn,
+            'accuracy': accuracy,
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1,
+            'total_time_ms': total_time
+        }
+
     def test_api_tts_alias(self) -> TestResult:
         """Test /api/tts/* alias route."""
         return self._test(
@@ -657,6 +1096,7 @@ class TestRunner:
         self._run_and_print(self.test_spectrogram_via_llm)
         self._run_and_print(self.test_spectrogram_minimal_query)
         self._run_and_print(self.test_spectrogram_response_fields)
+        self._run_and_print(self.test_spectrogram_isotope_identification)
         print()
         
         # Group 7: API Aliases
@@ -775,6 +1215,11 @@ def main():
         help="Run only health check tests (fast)"
     )
     parser.add_argument(
+        "--benchmark",
+        action="store_true",
+        help="Run isotope identification benchmark suite (10 tests)"
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         help="Show detailed request/response for each test"
@@ -793,6 +1238,24 @@ def main():
         runner.test_tts_health()
         runner.test_llm_health()
         runner._print_summary()
+    elif args.benchmark:
+        # Isotope identification benchmark
+        print(f"Isotope Benchmark mode - testing {base_url}")
+        all_results = runner.run_isotope_benchmark()
+        # Get best variant accuracy
+        best_accuracy = 0
+        for variant, results in all_results.items():
+            total_expected = 0
+            total_tp = 0
+            for r in results:
+                if r.response_data and '_benchmark' in r.response_data:
+                    b = r.response_data['_benchmark']
+                    total_expected += len(b['expected'])
+                    total_tp += len(b['true_positives'])
+            accuracy = total_tp / total_expected if total_expected > 0 else 0
+            if accuracy > best_accuracy:
+                best_accuracy = accuracy
+        sys.exit(0 if best_accuracy >= 0.7 else 1)
     else:
         # Full test suite
         all_passed = runner.run_all()

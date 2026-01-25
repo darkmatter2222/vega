@@ -178,30 +178,19 @@ if (-not $SkipCopy) {
         }
     }
     
-    # Copy model file from sample directory (one level up)
-    Write-Host "Copying model file..." -ForegroundColor Cyan
-    $modelPath = Join-Path (Split-Path $PROJECT_DIR -Parent) "sample\vega_v2_final.pt"
-    if (Test-Path $modelPath) {
-        Write-Host "  Copying vega_v2_final.pt..." -ForegroundColor DarkGray
-        $scpArgs = @($modelPath, "${SSH_TARGET}:${REMOTE_PATH}/models/")
+    # Copy model file from local models directory
+    Write-Host "Copying 2D model file..." -ForegroundColor Cyan
+    $localModelPath = Join-Path $PROJECT_DIR "models\vega_2d_final.pt"
+    if (Test-Path $localModelPath) {
+        Write-Host "  Copying vega_2d_final.pt from local models..." -ForegroundColor DarkGray
+        $scpArgs = @($localModelPath, "${SSH_TARGET}:${REMOTE_PATH}/models/")
         if ($SSH_KEY_PATH -and $SSH_KEY_PATH -ne "~/.ssh/id_rsa") {
             $scpArgs = @("-i", $SSH_KEY_PATH) + $scpArgs
         }
         scp @scpArgs
     } else {
-        # Try local models directory
-        $localModelPath = Join-Path $PROJECT_DIR "models\vega_v2_final.pt"
-        if (Test-Path $localModelPath) {
-            Write-Host "  Copying vega_v2_final.pt from local models..." -ForegroundColor DarkGray
-            $scpArgs = @($localModelPath, "${SSH_TARGET}:${REMOTE_PATH}/models/")
-            if ($SSH_KEY_PATH -and $SSH_KEY_PATH -ne "~/.ssh/id_rsa") {
-                $scpArgs = @("-i", $SSH_KEY_PATH) + $scpArgs
-            }
-            scp @scpArgs
-        } else {
-            Write-Host "  WARNING: Model file not found!" -ForegroundColor Yellow
-            Write-Host "  Expected at: $modelPath" -ForegroundColor Yellow
-        }
+        Write-Host "  WARNING: 2D Model file not found!" -ForegroundColor Yellow
+        Write-Host "  Expected at: $localModelPath" -ForegroundColor Yellow
     }
     
     Write-Host "Files copied successfully!" -ForegroundColor Green

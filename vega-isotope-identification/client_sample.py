@@ -1,7 +1,18 @@
 """
-Vega Isotope Identification Client Sample
+Vega 2D Isotope Identification Client Sample
 
-Demonstrates how to use the Vega Isotope Identification API for gamma spectrum analysis.
+Demonstrates how to use the Vega 2D Isotope Identification API for gamma spectrum analysis.
+
+The API v2.0 supports 2D spectra (60 time intervals × 1023 energy channels) for improved
+isotope identification accuracy. Legacy 1D spectra (1023 channels) are still supported
+via the /identify/1d endpoint.
+
+2D Spectrum Format:
+    - Shape: (60, 1023) 
+    - Axis 0: Time intervals (60 one-second intervals)
+    - Axis 1: Energy channels (1023 channels, 20 keV to 3000 keV)
+    
+API Version: 2.0.0
 """
 
 import requests
@@ -11,7 +22,7 @@ import sys
 import json
 import math
 import random
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 
 # Default API endpoint (via ingress)
 API_URL = "http://192.168.86.48:8080"
@@ -19,8 +30,9 @@ API_URL = "http://192.168.86.48:8080"
 # Direct endpoint (bypassing ingress)
 DIRECT_API_URL = "http://192.168.86.48:8020"
 
-# Number of channels in spectrum
-NUM_CHANNELS = 1023
+# Spectrum dimensions (fixed by model architecture)
+NUM_CHANNELS = 1023         # Energy channels
+NUM_TIME_INTERVALS = 60     # Time dimension (1-second intervals)
 
 
 def energy_to_channel(energy_kev: float, num_channels: int = NUM_CHANNELS) -> int:
@@ -36,8 +48,9 @@ def create_synthetic_spectrum(
     duration_seconds: float = 300.0,
     add_background: bool = True,
     add_noise: bool = True,
-    seed: Optional[int] = None
-) -> List[float]:
+    seed: Optional[int] = None,
+    return_2d: bool = True
+) -> Union[List[float], List[List[float]]]:
     """
     Generate a synthetic gamma spectrum for testing.
     
@@ -48,9 +61,11 @@ def create_synthetic_spectrum(
         add_background: Add environmental background
         add_noise: Apply Poisson counting statistics
         seed: Random seed for reproducibility
+        return_2d: If True, return 2D spectrum (60, 1023). If False, return 1D (1023,)
         
     Returns:
-        List of 1023 float values (counts per channel)
+        If return_2d=True: 2D spectrum as list of 60 time intervals, each 1023 channels
+        If return_2d=False: 1D spectrum as list of 1023 float values
     """
     if seed is not None:
         random.seed(seed)
@@ -98,11 +113,54 @@ def create_synthetic_spectrum(
     if add_noise:
         spectrum = [max(0, random.gauss(c, math.sqrt(max(c, 1)))) for c in spectrum]
     
+    # Return 2D or 1D spectrum
+    if return_2d:
+        return expand_to_2d(spectrum)
     return spectrum
 
 
+def expand_to_2d(
+    spectrum_1d: List[float],
+    num_intervals: int = NUM_TIME_INTERVALS,
+    add_variation: bool = True,
+    seed: Optional[int] = None
+) -> List[List[float]]:
+    """
+    Expand a 1D spectrum to 2D by simulating time-series data.
+    
+    The 2D model expects 60 time intervals (1 second each) of spectral data.
+    This function simulates realistic time variation by adding counting 
+    statistics noise to each interval.
+    
+    Args:
+        spectrum_1d: 1D spectrum (1023 channels) - total counts
+        num_intervals: Number of time intervals (default 60)
+        add_variation: Add realistic counting variation per interval
+        seed: Random seed for reproducibility
+        
+    Returns:
+        2D spectrum as list of lists, shape (60, 1023)
+    """
+    if seed is not None:
+        random.seed(seed)
+    
+    # Divide total counts by number of intervals
+    interval_spectrum = [c / num_intervals for c in spectrum_1d]
+    
+    spectrum_2d = []
+    for _ in range(num_intervals):
+        if add_variation:
+            # Add Poisson-like counting statistics per interval
+            interval = [max(0, random.gauss(c, math.sqrt(max(c, 0.1)))) for c in interval_spectrum]
+        else:
+            interval = interval_spectrum.copy()
+        spectrum_2d.append(interval)
+    
+    return spectrum_2d
+
+
 def identify_isotopes(
-    spectrum: List[float],
+    spectrum: Union[List[float], List[List[float]]],
     threshold: float = 0.5,
     return_all: bool = False,
     use_ingress: bool = True
@@ -110,8 +168,10 @@ def identify_isotopes(
     """
     Identify isotopes from a gamma spectrum.
     
+    Automatically detects if input is 1D or 2D and routes to appropriate endpoint.
+    
     Args:
-        spectrum: List of 1023 float values (counts per channel)
+        spectrum: 2D spectrum (60×1023) or 1D spectrum (1023 channels)
         threshold: Detection threshold (0-1). Lower = more sensitive
         return_all: If True, return all 82 isotopes. If False, only detected ones.
         use_ingress: If True, use ingress gateway. If False, direct API.
@@ -120,7 +180,14 @@ def identify_isotopes(
         API response with detected isotopes, probabilities, and activities
     """
     base_url = API_URL if use_ingress else DIRECT_API_URL
-    endpoint = "/identify" if use_ingress else "/identify"
+    
+    # Detect if 1D or 2D spectrum
+    is_2d = isinstance(spectrum[0], list)
+    
+    if is_2d:
+        endpoint = "/identify"
+    else:
+        endpoint = "/identify/1d"
     
     payload = {
         "spectrum": spectrum,
@@ -143,7 +210,7 @@ def identify_isotopes_b64(
     Identify isotopes from a base64-encoded numpy array.
     
     Args:
-        npy_bytes: Bytes of a .npy file
+        npy_bytes: Bytes of a .npy file (shape: (60, 1023) or (1023,))
         threshold: Detection threshold (0-1)
         return_all: If True, return all 82 isotopes
         use_ingress: If True, use ingress gateway
@@ -165,15 +232,15 @@ def identify_isotopes_b64(
 
 
 def identify_batch(
-    spectra: List[List[float]],
+    spectra: List[List[List[float]]],
     threshold: float = 0.5,
     use_ingress: bool = True
 ) -> Dict[str, Any]:
     """
-    Batch identification for multiple spectra.
+    Batch identification for multiple 2D spectra.
     
     Args:
-        spectra: List of spectra (each 1023 channels)
+        spectra: List of 2D spectra (each shape: 60×1023)
         threshold: Detection threshold (0-1)
         use_ingress: If True, use ingress gateway
     
@@ -221,8 +288,9 @@ def get_info(use_ingress: bool = True) -> Dict[str, Any]:
 def demo():
     """Run a demonstration of the isotope identification API."""
     print("=" * 70)
-    print("VEGA ISOTOPE IDENTIFICATION - CLIENT DEMO")
+    print("VEGA 2D ISOTOPE IDENTIFICATION - CLIENT DEMO (API v2.0)")
     print("=" * 70)
+    print(f"Input format: {NUM_TIME_INTERVALS} time intervals × {NUM_CHANNELS} energy channels")
     
     # Check health
     print("\n[1] Checking API health...")
@@ -245,14 +313,15 @@ def demo():
     except Exception as e:
         print(f"    Error: {e}")
     
-    # Test with synthetic Cs-137 spectrum
-    print("\n[3] Creating synthetic Cs-137 spectrum...")
-    spectrum_cs137 = create_synthetic_spectrum("Cs-137", activity_bq=100, seed=42)
-    print(f"    Spectrum length: {len(spectrum_cs137)}")
-    print(f"    Max counts: {max(spectrum_cs137):.1f}")
+    # Test with synthetic Cs-137 spectrum (2D)
+    print("\n[3] Creating synthetic Cs-137 2D spectrum...")
+    spectrum_cs137 = create_synthetic_spectrum("Cs-137", activity_bq=100, seed=42, return_2d=True)
+    print(f"    Spectrum shape: ({len(spectrum_cs137)}, {len(spectrum_cs137[0])})")
+    total_max = max(max(row) for row in spectrum_cs137)
+    print(f"    Max counts per interval: {total_max:.1f}")
     
     # Identify isotopes
-    print("\n[4] Identifying isotopes...")
+    print("\n[4] Identifying isotopes from 2D spectrum...")
     try:
         result = identify_isotopes(spectrum_cs137, threshold=0.5)
         print(f"    Detected: {result['num_detected']} isotope(s)")
@@ -265,24 +334,27 @@ def demo():
     except Exception as e:
         print(f"    Error: {e}")
     
-    # Test with Co-60 (dual peaks)
-    print("\n[5] Testing Co-60 identification...")
-    spectrum_co60 = create_synthetic_spectrum("Co-60", activity_bq=50, seed=123)
+    # Test with Co-60 (dual peaks) - 1D legacy mode
+    print("\n[5] Testing Co-60 with 1D legacy endpoint...")
+    spectrum_co60_1d = create_synthetic_spectrum("Co-60", activity_bq=50, seed=123, return_2d=False)
+    print(f"    Spectrum length: {len(spectrum_co60_1d)}")
     try:
-        result = identify_isotopes(spectrum_co60, threshold=0.3)
+        result = identify_isotopes(spectrum_co60_1d, threshold=0.3)  # Auto-detects 1D
         print(f"    Detected: {result['num_detected']} isotope(s)")
         for iso in result['isotopes']:
             print(f"      • {iso['name']}: {iso['probability']:.1%}")
     except Exception as e:
         print(f"    Error: {e}")
     
-    # Batch test
-    print("\n[6] Testing batch identification...")
+    # Batch test with 2D spectra
+    print("\n[6] Testing batch identification with 2D spectra...")
     spectra = [
-        create_synthetic_spectrum("Cs-137", seed=1),
-        create_synthetic_spectrum("Na-22", seed=2),
-        create_synthetic_spectrum("K-40", seed=3),
+        create_synthetic_spectrum("Cs-137", seed=1, return_2d=True),
+        create_synthetic_spectrum("Na-22", seed=2, return_2d=True),
+        create_synthetic_spectrum("K-40", seed=3, return_2d=True),
     ]
+    print(f"    Batch size: {len(spectra)} spectra")
+    print(f"    Each spectrum: ({len(spectra[0])}, {len(spectra[0][0])})")
     try:
         result = identify_batch(spectra, threshold=0.3)
         print(f"    Processed: {result['total_spectra']} spectra")

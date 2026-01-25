@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-Vega Isotope Identification REST API
+Vega 2D Isotope Identification REST API
 
-FastAPI server for gamma spectrum isotope identification using the trained Vega model.
+FastAPI server for gamma spectrum isotope identification using the trained Vega 2D model.
 
 Endpoints:
-    POST /identify         - Identify isotopes from spectrum data (numpy array)
+    POST /identify         - Identify isotopes from 2D spectrum data
+    POST /identify/1d      - Identify isotopes from 1D spectrum (legacy support)
     POST /identify/b64     - Identify isotopes from base64-encoded spectrum
     POST /identify/batch   - Batch identification for multiple spectra
     GET  /health           - Health check
     GET  /info             - Model info and supported isotopes
     GET  /isotopes         - List all supported isotopes
 
-The model accepts:
-    - 1D spectrum: shape (1023,) - single measurement
-    - 2D spectrum: shape (N, 1023) - time series (averaged automatically)
+The 2D model accepts:
+    - 2D spectrum: shape (60, 1023) - 60 time intervals × 1023 energy channels
+    - 1D spectrum: shape (1023,) - will be expanded to 2D automatically
     
 Energy range: 20 keV to 3000 keV across 1023 channels
+Time: 60 one-second intervals (1 minute total measurement)
 """
 
 import os
@@ -26,11 +28,13 @@ import io
 import json
 import logging
 import argparse
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
+import torch.nn as nn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -44,14 +48,15 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ==============================================================================
 
-MODEL_PATH = os.getenv("VEGA_ISOTOPE_MODEL", "models/vega_v2_final.pt")
+MODEL_PATH = os.getenv("VEGA_ISOTOPE_MODEL", "models/vega_2d_final.pt")
 DEVICE = os.getenv("VEGA_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
 DEFAULT_THRESHOLD = float(os.getenv("VEGA_DEFAULT_THRESHOLD", "0.5"))
-NUM_CHANNELS = 1023  # Fixed by model architecture
-NUM_ISOTOPES = 82    # Fixed by model architecture
+NUM_CHANNELS = 1023       # Fixed by model architecture (energy channels)
+NUM_TIME_INTERVALS = 60   # Fixed by model architecture (time dimension)
+NUM_ISOTOPES = 82         # Fixed by model architecture
 
 # ==============================================================================
-# Model Architecture (embedded from vega_portable_inference.py)
+# Isotope Database (Embedded)
 # ==============================================================================
 
 # Complete list of 82 isotopes supported by the model (alphabetically sorted)
@@ -127,128 +132,150 @@ class IsotopeIndex:
         return self._idx_to_name[idx]
 
 
-from dataclasses import dataclass, field
-from typing import List
-
+# ==============================================================================
+# 2D Model Architecture (Embedded from vega_portable_inference_2d.py)
+# ==============================================================================
 
 @dataclass
-class VegaConfig:
-    """Configuration for the Vega model architecture."""
-    num_channels: int = 1023
+class Vega2DConfig:
+    """Configuration for Vega 2D model."""
+    
+    # Input dimensions
+    num_channels: int = 1023          # Energy channels
+    num_time_intervals: int = 60      # Fixed time dimension
+    
+    # Output
     num_isotopes: int = 82
-    conv_channels: List[int] = field(default_factory=lambda: [64, 128, 256])
-    conv_kernel_size: int = 7
-    pool_size: int = 2
+    
+    # CNN architecture
+    conv_channels: List[int] = field(default_factory=lambda: [32, 64, 128])
+    kernel_size: Tuple[int, int] = (3, 7)  # (time, energy)
+    pool_size: Tuple[int, int] = (2, 2)
+    
+    # FC layers
     fc_hidden_dims: List[int] = field(default_factory=lambda: [512, 256])
+    
+    # Regularization
     dropout_rate: float = 0.3
-    spatial_dropout_rate: float = 0.1
-    leaky_relu_slope: float = 0.1
-    classification_weight: float = 1.0
-    regression_weight: float = 0.1
+    leaky_relu_slope: float = 0.01
+    
+    # Activity scaling
     max_activity_bq: float = 1000.0
 
 
-class ConvBlock(torch.nn.Module):
-    """CNN block: Conv → BN → LeakyReLU → Conv → BN → LeakyReLU → MaxPool → Dropout"""
+class ConvBlock2D(nn.Module):
+    """2D Convolutional block with BatchNorm, activation, pooling, and dropout."""
     
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: int = 7,
-        pool_size: int = 2,
-        dropout_rate: float = 0.1,
-        leaky_slope: float = 0.1
+        kernel_size: Tuple[int, int],
+        pool_size: Tuple[int, int],
+        dropout_rate: float,
+        leaky_relu_slope: float
     ):
         super().__init__()
         
-        self.conv1 = torch.nn.Conv1d(in_channels, out_channels, kernel_size, padding=kernel_size // 2)
-        self.bn1 = torch.nn.BatchNorm1d(out_channels)
-        self.act1 = torch.nn.LeakyReLU(leaky_slope)
+        padding = (kernel_size[0] // 2, kernel_size[1] // 2)
         
-        self.conv2 = torch.nn.Conv1d(out_channels, out_channels, kernel_size, padding=kernel_size // 2)
-        self.bn2 = torch.nn.BatchNorm1d(out_channels)
-        self.act2 = torch.nn.LeakyReLU(leaky_slope)
-        
-        self.pool = torch.nn.MaxPool1d(pool_size)
-        self.dropout = torch.nn.Dropout1d(dropout_rate)
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size, padding=padding)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.activation = nn.LeakyReLU(leaky_relu_slope)
+        self.pool = nn.MaxPool2d(pool_size)
+        self.dropout = nn.Dropout2d(dropout_rate)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.act1(self.bn1(self.conv1(x)))
-        x = self.act2(self.bn2(self.conv2(x)))
-        x = self.dropout(self.pool(x))
+        x = self.activation(self.bn1(self.conv1(x)))
+        x = self.activation(self.bn2(self.conv2(x)))
+        x = self.pool(x)
+        x = self.dropout(x)
         return x
 
 
-class VegaModel(torch.nn.Module):
-    """Vega: CNN-FCNN for Multi-Label Isotope Classification + Activity Regression"""
+class Vega2DModel(nn.Module):
+    """
+    2D CNN model for gamma spectrum isotope identification.
     
-    def __init__(self, config: VegaConfig):
+    Treats spectra as images with time on one axis and energy channels on the other.
+    Input shape: (batch, 1, 60, 1023) or (batch, 60, 1023)
+    """
+    
+    def __init__(self, config: Vega2DConfig = None):
         super().__init__()
-        self.config = config
-        self.backbone = self._build_backbone()
-        self._flat_size = self._calculate_flat_size()
-        self.classifier = self._build_classifier()
-        self.regressor = self._build_regressor()
-    
-    def _build_backbone(self) -> torch.nn.Sequential:
-        layers = []
-        in_ch = 1
-        for out_ch in self.config.conv_channels:
-            layers.append(ConvBlock(
-                in_ch, out_ch,
-                kernel_size=self.config.conv_kernel_size,
+        self.config = config or Vega2DConfig()
+        
+        # Build CNN backbone
+        self.conv_blocks = nn.ModuleList()
+        in_channels = 1
+        
+        for out_channels in self.config.conv_channels:
+            self.conv_blocks.append(ConvBlock2D(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=self.config.kernel_size,
                 pool_size=self.config.pool_size,
-                dropout_rate=self.config.spatial_dropout_rate,
-                leaky_slope=self.config.leaky_relu_slope
+                dropout_rate=self.config.dropout_rate,
+                leaky_relu_slope=self.config.leaky_relu_slope
             ))
-            in_ch = out_ch
-        return torch.nn.Sequential(*layers)
+            in_channels = out_channels
+        
+        # Calculate flattened size
+        self.flat_size = self._calculate_flat_size()
+        
+        # FC backbone
+        fc_layers = []
+        fc_in = self.flat_size
+        
+        for fc_out in self.config.fc_hidden_dims:
+            fc_layers.extend([
+                nn.Linear(fc_in, fc_out),
+                nn.BatchNorm1d(fc_out),
+                nn.LeakyReLU(self.config.leaky_relu_slope),
+                nn.Dropout(self.config.dropout_rate)
+            ])
+            fc_in = fc_out
+        
+        self.fc_backbone = nn.Sequential(*fc_layers)
+        
+        # Output heads
+        self.classifier = nn.Linear(fc_in, self.config.num_isotopes)
+        self.regressor = nn.Sequential(
+            nn.Linear(fc_in, self.config.num_isotopes),
+            nn.ReLU()
+        )
     
     def _calculate_flat_size(self) -> int:
-        with torch.no_grad():
-            x = torch.zeros(1, 1, self.config.num_channels)
-            x = self.backbone(x)
-            return x.view(1, -1).size(1)
+        h = self.config.num_time_intervals
+        w = self.config.num_channels
+        
+        for _ in self.config.conv_channels:
+            h = h // self.config.pool_size[0]
+            w = w // self.config.pool_size[1]
+        
+        return self.config.conv_channels[-1] * h * w
     
-    def _build_classifier(self) -> torch.nn.Sequential:
-        layers = []
-        in_dim = self._flat_size
-        for hidden_dim in self.config.fc_hidden_dims:
-            layers.extend([
-                torch.nn.Linear(in_dim, hidden_dim),
-                torch.nn.BatchNorm1d(hidden_dim),
-                torch.nn.LeakyReLU(self.config.leaky_relu_slope),
-                torch.nn.Dropout(self.config.dropout_rate)
-            ])
-            in_dim = hidden_dim
-        layers.append(torch.nn.Linear(in_dim, self.config.num_isotopes))
-        return torch.nn.Sequential(*layers)
-    
-    def _build_regressor(self) -> torch.nn.Sequential:
-        layers = []
-        in_dim = self._flat_size
-        for hidden_dim in self.config.fc_hidden_dims:
-            layers.extend([
-                torch.nn.Linear(in_dim, hidden_dim),
-                torch.nn.BatchNorm1d(hidden_dim),
-                torch.nn.LeakyReLU(self.config.leaky_relu_slope),
-                torch.nn.Dropout(self.config.dropout_rate)
-            ])
-            in_dim = hidden_dim
-        layers.extend([
-            torch.nn.Linear(in_dim, self.config.num_isotopes),
-            torch.nn.ReLU()  # Activities must be positive
-        ])
-        return torch.nn.Sequential(*layers)
-    
-    def forward(self, x: torch.Tensor):
-        if x.dim() == 2:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Add channel dimension if needed: (B, T, C) -> (B, 1, T, C)
+        if x.dim() == 3:
             x = x.unsqueeze(1)
-        features = self.backbone(x)
-        features = features.view(features.size(0), -1)
-        logits = self.classifier(features)
-        activities = self.regressor(features)
+        
+        # CNN backbone
+        for conv_block in self.conv_blocks:
+            x = conv_block(x)
+        
+        # Flatten
+        x = x.view(x.size(0), -1)
+        
+        # FC backbone
+        x = self.fc_backbone(x)
+        
+        # Output heads
+        logits = self.classifier(x)
+        activities = self.regressor(x)
+        
         return logits, activities
 
 
@@ -265,12 +292,10 @@ class IsotopePrediction(BaseModel):
 
 
 class IdentifyRequest(BaseModel):
-    """Request to identify isotopes from spectrum data."""
-    spectrum: List[float] = Field(
+    """Request to identify isotopes from 2D spectrum data."""
+    spectrum: List[List[float]] = Field(
         ..., 
-        min_length=NUM_CHANNELS, 
-        max_length=NUM_CHANNELS,
-        description=f"Gamma spectrum as list of {NUM_CHANNELS} float values (counts per channel)"
+        description=f"2D gamma spectrum as list of {NUM_TIME_INTERVALS} time intervals, each with {NUM_CHANNELS} channels"
     )
     threshold: float = Field(
         default=DEFAULT_THRESHOLD, 
@@ -284,11 +309,23 @@ class IdentifyRequest(BaseModel):
     )
 
 
+class IdentifyRequest1D(BaseModel):
+    """Request to identify isotopes from 1D spectrum data (legacy support)."""
+    spectrum: List[float] = Field(
+        ..., 
+        min_length=NUM_CHANNELS, 
+        max_length=NUM_CHANNELS,
+        description=f"1D gamma spectrum as list of {NUM_CHANNELS} float values (will be expanded to 2D)"
+    )
+    threshold: float = Field(default=DEFAULT_THRESHOLD, ge=0, le=1)
+    return_all: bool = Field(default=False)
+
+
 class IdentifyB64Request(BaseModel):
     """Request with base64-encoded numpy array."""
     spectrum_b64: str = Field(
         ...,
-        description="Base64-encoded numpy array (.npy format bytes)"
+        description="Base64-encoded numpy array (.npy format bytes). Shape: (60, 1023) or (1023,)"
     )
     threshold: float = Field(default=DEFAULT_THRESHOLD, ge=0, le=1)
     return_all: bool = Field(default=False)
@@ -296,9 +333,9 @@ class IdentifyB64Request(BaseModel):
 
 class IdentifyBatchRequest(BaseModel):
     """Batch identification request."""
-    spectra: List[List[float]] = Field(
+    spectra: List[List[List[float]]] = Field(
         ...,
-        description=f"List of spectra, each with {NUM_CHANNELS} channels"
+        description=f"List of 2D spectra, each with shape ({NUM_TIME_INTERVALS}, {NUM_CHANNELS})"
     )
     threshold: float = Field(default=DEFAULT_THRESHOLD, ge=0, le=1)
     return_all: bool = Field(default=False)
@@ -330,11 +367,12 @@ class HealthResponse(BaseModel):
 class InfoResponse(BaseModel):
     """Model information response."""
     service: str = "vega-isotope-identification"
-    version: str = "1.0.0"
+    version: str = "2.0.0"
     model_path: str
     device: str
     num_isotopes: int
     num_channels: int
+    num_time_intervals: int
     default_threshold: float
     model_loaded: bool
     architecture: str
@@ -351,8 +389,8 @@ class IsotopeListResponse(BaseModel):
 # Inference Engine Singleton
 # ==============================================================================
 
-class VegaInferenceEngine:
-    """Singleton inference engine for isotope identification."""
+class Vega2DInferenceEngine:
+    """Singleton inference engine for 2D isotope identification."""
     
     _instance = None
     
@@ -363,7 +401,7 @@ class VegaInferenceEngine:
         return cls._instance
     
     def initialize(self, model_path: str, device: str = None):
-        """Load the model."""
+        """Load the 2D model."""
         if self._initialized:
             return
         
@@ -381,7 +419,7 @@ class VegaInferenceEngine:
         else:
             self.device = torch.device('cpu')
         
-        logger.info(f"Loading model from: {model_path}")
+        logger.info(f"Loading 2D model from: {model_path}")
         logger.info(f"Using device: {self.device}")
         
         # Load checkpoint
@@ -390,23 +428,17 @@ class VegaInferenceEngine:
         # Load model config
         if 'model_config' in self.checkpoint:
             config_dict = self.checkpoint['model_config']
-            self.model_config = VegaConfig(**config_dict)
-        elif 'params' in self.checkpoint:
-            params = self.checkpoint['params']
-            self.model_config = VegaConfig(
-                conv_channels=params.get('conv_channels', [64, 128, 256]),
-                conv_kernel_size=params.get('conv_kernel_size', 7),
-                pool_size=params.get('pool_size', 2),
-                fc_hidden_dims=params.get('fc_hidden_dims', [512, 256]),
-                dropout_rate=params.get('dropout_rate', 0.3),
-                spatial_dropout_rate=params.get('spatial_dropout_rate', 0.1),
-                leaky_relu_slope=params.get('leaky_relu_slope', 0.1)
-            )
+            # Handle tuple conversion for kernel_size and pool_size
+            if 'kernel_size' in config_dict and isinstance(config_dict['kernel_size'], list):
+                config_dict['kernel_size'] = tuple(config_dict['kernel_size'])
+            if 'pool_size' in config_dict and isinstance(config_dict['pool_size'], list):
+                config_dict['pool_size'] = tuple(config_dict['pool_size'])
+            self.model_config = Vega2DConfig(**config_dict)
         else:
-            self.model_config = VegaConfig()
+            self.model_config = Vega2DConfig()
         
         # Create and load model
-        self.model = VegaModel(self.model_config)
+        self.model = Vega2DModel(self.model_config)
         self.model.load_state_dict(self.checkpoint['model_state_dict'])
         self.model = self.model.to(self.device)
         self.model.eval()
@@ -415,8 +447,9 @@ class VegaInferenceEngine:
         self.isotope_index = IsotopeIndex()
         
         logger.info(f"✓ Model loaded successfully")
+        logger.info(f"  Input shape: ({self.model_config.num_time_intervals}, {self.model_config.num_channels})")
         logger.info(f"  Isotopes: {self.isotope_index.num_isotopes}")
-        logger.info(f"  Architecture: CNN{self.model_config.conv_channels} → FC{self.model_config.fc_hidden_dims}")
+        logger.info(f"  Architecture: 2D-CNN{self.model_config.conv_channels} → FC{self.model_config.fc_hidden_dims}")
         
         self._initialized = True
     
@@ -424,11 +457,38 @@ class VegaInferenceEngine:
     def is_loaded(self) -> bool:
         return self._initialized
     
+    def _pad_or_truncate(self, spectrum: np.ndarray) -> np.ndarray:
+        """Ensure spectrum has exactly num_time_intervals rows."""
+        target_rows = self.model_config.num_time_intervals
+        current_rows = spectrum.shape[0]
+        
+        if current_rows == target_rows:
+            return spectrum
+        elif current_rows > target_rows:
+            # Truncate - take last N intervals (most recent data)
+            return spectrum[-target_rows:]
+        else:
+            # Pad with zeros at the beginning
+            padding = np.zeros((target_rows - current_rows, spectrum.shape[1]))
+            return np.vstack([padding, spectrum])
+    
     def preprocess(self, spectrum: np.ndarray, normalize: bool = True) -> torch.Tensor:
-        """Preprocess spectrum for model input."""
-        # Average time series if 2D
-        if spectrum.ndim == 2:
-            spectrum = spectrum.mean(axis=0)
+        """
+        Preprocess spectrum for model input.
+        
+        Args:
+            spectrum: Input array, shape (T, 1023) or (1023,)
+            normalize: Normalize to [0, 1] range
+            
+        Returns:
+            Tensor ready for model, shape (1, 60, 1023)
+        """
+        # Handle 1D input (single spectrum) - expand by repeating
+        if spectrum.ndim == 1:
+            spectrum = np.tile(spectrum.reshape(1, -1), (self.model_config.num_time_intervals, 1))
+        
+        # Ensure correct time dimension
+        spectrum = self._pad_or_truncate(spectrum)
         
         # Normalize
         if normalize and spectrum.max() > 0:
@@ -493,7 +553,7 @@ class VegaInferenceEngine:
 
 
 # Global inference engine
-engine = VegaInferenceEngine()
+engine = Vega2DInferenceEngine()
 
 
 # ==============================================================================
@@ -504,7 +564,7 @@ engine = VegaInferenceEngine()
 async def lifespan(app: FastAPI):
     """Startup/shutdown lifecycle."""
     # Startup: load model
-    logger.info("Starting Vega Isotope Identification API...")
+    logger.info("Starting Vega 2D Isotope Identification API...")
     try:
         engine.initialize(MODEL_PATH, DEVICE)
     except Exception as e:
@@ -516,9 +576,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Vega Isotope Identification API",
-    description="Gamma spectrum isotope identification using deep learning",
-    version="1.0.0",
+    title="Vega 2D Isotope Identification API",
+    description="Gamma spectrum isotope identification using 2D CNN deep learning",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -551,14 +611,15 @@ async def get_info():
     """Get model and service information."""
     return {
         "service": "vega-isotope-identification",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "model_path": MODEL_PATH,
         "device": str(engine.device) if engine.is_loaded else "N/A",
         "num_isotopes": NUM_ISOTOPES,
         "num_channels": NUM_CHANNELS,
+        "num_time_intervals": NUM_TIME_INTERVALS,
         "default_threshold": DEFAULT_THRESHOLD,
         "model_loaded": engine.is_loaded,
-        "architecture": f"CNN{engine.model_config.conv_channels} → FC{engine.model_config.fc_hidden_dims}" if engine.is_loaded else "N/A"
+        "architecture": f"2D-CNN{engine.model_config.conv_channels} → FC{engine.model_config.fc_hidden_dims}" if engine.is_loaded else "N/A"
     }
 
 
@@ -575,10 +636,45 @@ async def list_isotopes():
 @app.post("/identify", response_model=IdentifyResponse)
 async def identify_isotopes(request: IdentifyRequest):
     """
-    Identify isotopes from a gamma spectrum.
+    Identify isotopes from a 2D gamma spectrum.
     
-    The spectrum should be 1023 float values representing counts per channel.
+    The spectrum should be 60 time intervals × 1023 energy channels.
     Energy range: 20 keV to 3000 keV.
+    Time: 60 one-second intervals.
+    """
+    if not engine.is_loaded:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+    
+    try:
+        spectrum = np.array(request.spectrum, dtype=np.float32)
+        
+        # Validate shape
+        if spectrum.ndim != 2:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected 2D spectrum, got shape {spectrum.shape}"
+            )
+        if spectrum.shape[1] != NUM_CHANNELS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Expected {NUM_CHANNELS} channels, got {spectrum.shape[1]}"
+            )
+        
+        result = engine.predict(spectrum, request.threshold, request.return_all)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Prediction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/identify/1d", response_model=IdentifyResponse)
+async def identify_isotopes_1d(request: IdentifyRequest1D):
+    """
+    Identify isotopes from a 1D gamma spectrum (legacy support).
+    
+    The spectrum will be expanded to 2D by repeating across 60 time intervals.
     """
     if not engine.is_loaded:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -598,6 +694,7 @@ async def identify_isotopes_b64(request: IdentifyB64Request):
     Identify isotopes from a base64-encoded numpy array.
     
     The spectrum should be a .npy file encoded as base64.
+    Accepts shape (60, 1023) or (1023,).
     """
     if not engine.is_loaded:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -611,7 +708,7 @@ async def identify_isotopes_b64(request: IdentifyB64Request):
         if spectrum.ndim == 1 and len(spectrum) != NUM_CHANNELS:
             raise HTTPException(
                 status_code=400, 
-                detail=f"Expected {NUM_CHANNELS} channels, got {len(spectrum)}"
+                detail=f"Expected {NUM_CHANNELS} channels for 1D input, got {len(spectrum)}"
             )
         if spectrum.ndim == 2 and spectrum.shape[1] != NUM_CHANNELS:
             raise HTTPException(
@@ -631,7 +728,7 @@ async def identify_isotopes_b64(request: IdentifyB64Request):
 @app.post("/identify/batch", response_model=IdentifyBatchResponse)
 async def identify_isotopes_batch(request: IdentifyBatchRequest):
     """
-    Batch identification for multiple spectra.
+    Batch identification for multiple 2D spectra.
     """
     if not engine.is_loaded:
         raise HTTPException(status_code=503, detail="Model not loaded")
@@ -641,12 +738,12 @@ async def identify_isotopes_batch(request: IdentifyBatchRequest):
     
     results = []
     for spectrum_data in request.spectra:
-        if len(spectrum_data) != NUM_CHANNELS:
+        spectrum = np.array(spectrum_data, dtype=np.float32)
+        if spectrum.ndim != 2 or spectrum.shape[1] != NUM_CHANNELS:
             raise HTTPException(
                 status_code=400,
-                detail=f"Each spectrum must have {NUM_CHANNELS} channels"
+                detail=f"Each spectrum must have shape (T, {NUM_CHANNELS})"
             )
-        spectrum = np.array(spectrum_data, dtype=np.float32)
         result = engine.predict(spectrum, request.threshold, request.return_all)
         results.append(result)
     
@@ -664,7 +761,7 @@ async def identify_isotopes_batch(request: IdentifyBatchRequest):
 # ==============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Vega Isotope Identification API")
+    parser = argparse.ArgumentParser(description="Vega 2D Isotope Identification API")
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
     parser.add_argument("--port", type=int, default=8020, help="Port to bind to")
     parser.add_argument("--model", default=MODEL_PATH, help="Path to model checkpoint")

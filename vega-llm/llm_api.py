@@ -121,7 +121,39 @@ Your response must be EXACTLY:
 {
   // Valid JSON matching the requested schema
 }
-```"""
+```
+
+## ISOTOPE REFERENCE DATABASE
+
+When analyzing gamma spectra, use these reference energies to identify isotopes (±10 keV tolerance):
+
+| Isotope | Energy (keV) | Notes |
+|---------|-------------|-------|
+| Am-241 | 59.5 | Americium-241, smoke detectors, alpha emitter |
+| Ba-133 | 81, 356 | Barium-133, calibration source |
+| Cs-137 | 662 | Cesium-137, fission product, common calibration |
+| Co-60 | 1173 AND 1332 | Cobalt-60, requires BOTH peaks for confirmation |
+| K-40 | 1461 | Potassium-40, natural background, ubiquitous |
+| Na-22 | 511, 1275 | Sodium-22, positron emitter (511 = annihilation) |
+| I-131 | 364 | Iodine-131, medical/nuclear accident |
+| Eu-152 | 122, 344, 1408 | Europium-152, calibration source |
+| Ra-226 | 186, 609, 1764 | Radium-226 chain |
+| Th-232 | 239, 583, 2614 | Thorium-232 chain (Tl-208 at 2614) |
+| U-235 | 186 | Uranium-235 (overlaps Ra-226) |
+| U-238 | 1001 (Pa-234m) | Uranium-238 chain |
+
+### CONFIDENCE SCORING:
+- **95-100%**: Peak within ±5 keV of reference, strong counts
+- **85-94%**: Peak within ±10 keV of reference
+- **70-84%**: Peak within ±15 keV or weak signal
+- **50-69%**: Marginal match, possible interference
+- **<50%**: Uncertain, do not report as identified
+
+### MULTI-PEAK ISOTOPES:
+For Co-60 and Na-22, require ALL signature peaks for >80% confidence.
+Single peak = reduce confidence by 30%.
+
+When reporting isotope identification, ALWAYS include confidence percentage."""
 
 # ==============================================================================
 # Request/Response Models
